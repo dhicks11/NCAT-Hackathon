@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>SurgiControl 3D</title>
+  <style>
+    body { margin:0; overflow:hidden; }
+    canvas { display:block; }
+  </style>
+</head>
+<body>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+/*__INIT_DATA__*/
+
+// Initialize Three.js scene
+let scene = new THREE.Scene();
+scene.background = new THREE.Color(0xf0f0f0);
+
+let camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+camera.position.set(15, 15, 15);
+camera.lookAt(0, 0, 0);
+
+let renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// Initialize OrbitControls
+let controls;
+try {
+    controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.target.set(0, 0, 0);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+} catch (e) {
+    console.warn('OrbitControls not available, using simple mouse controls');
+    // Simple mouse controls fallback
+    let mouseDown = false;
+    let mouseX = 0, mouseY = 0;
+    document.addEventListener('mousedown', (e) => { mouseDown = true; mouseX = e.clientX; mouseY = e.clientY; });
+    document.addEventListener('mouseup', () => { mouseDown = false; });
+    document.addEventListener('mousemove', (e) => {
+        if (mouseDown) {
+            let deltaX = e.clientX - mouseX;
+            let deltaY = e.clientY - mouseY;
+            camera.rotation.y += deltaX * 0.01;
+            camera.rotation.x += deltaY * 0.01;
+            mouseX = e.clientX;
+            mouseY = e.clientY;
+        }
+    });
+    // Mouse wheel zoom
+    document.addEventListener('wheel', (e) => {
+        camera.position.multiplyScalar(1 + e.deltaY * 0.001);
+    });
+    controls = { update: function() {} };
+}
+
+// Add grid and axes helper
+let gridHelper = new THREE.GridHelper(20, 20);
+scene.add(gridHelper);
+let axesHelper = new THREE.AxesHelper(5);
+scene.add(axesHelper);
+
+// Robot visualization group
+let robotGroup = new THREE.Group();
+scene.add(robotGroup);
+
+// Materials
+let linkMaterial = new THREE.MeshBasicMaterial({ color: 0x0077ff, wireframe: false });
+let jointMaterial = new THREE.MeshBasicMaterial({ color: 0xff6600 });
+let trajectoryMaterial = new THREE.LineBasicMaterial({ color: 0xff0000, linewidth: 2 });
+
+// Store robot components
+let robotLinks = [];
+let robotJoints = [];
+let trajectoryLine = null;
+
+// Function to update robot visualization
+function updateRobot(jointPositions) {
+    // Clear previous robot
+    robotLinks.forEach(link => robotGroup.remove(link));
+    robotJoints.forEach(joint => robotGroup.remove(joint));
+    robotLinks = [];
+    robotJoints = [];
+    
+    // Calculate forward kinematics positions
+    // Using the same function as Python (simplified version)
+    function forwardKinematics(t1, t2, t3, t4, L1=4.0, L2=3.0, L3=2.0) {
+        t1 = t1 * Math.PI / 180;
+        t2 = t2 * Math.PI / 180;
+        t3 = t3 * Math.PI / 180;
+        t4 = t4 * Math.PI / 180;
+        
+        let x0 = 0, y0 = 0, z0 = 0;
+        let x1 = L1 * Math.cos(t1);
+        let y1 = L1 * Math.sin(t1);
+        let z1 = 0;
+        let x2 = x1 + L2 * Math.cos(t1) * Math.cos(t2);
+        let y2 = y1 + L2 * Math.sin(t1) * Math.cos(t2);
+        let z2 = L2 * Math.sin(t2);
+        let x3 = x2 + L3 * Math.cos(t1) * Math.cos(t2 + t3);
+        let y3 = y2 + L3 * Math.sin(t1) * Math.cos(t2 + t3);
+        let z3 = z2 + L3 * Math.sin(t2 + t3);
+        let x4 = x3 + 0.5 * Math.cos(t1) * Math.cos(t2 + t3 + t4);
+        let y4 = y3 + 0.5 * Math.sin(t1) * Math.cos(t2 + t3 + t4);
+        let z4 = z3 + 0.5 * Math.sin(t2 + t3 + t4);
+        
+        return [
+            [x0, y0, z0],
+            [x1, y1, z1],
+            [x2, y2, z2],
+            [x3, y3, z3],
+            [x4, y4, z4]
+        ];
+    }
+    
+    let positions = forwardKinematics(
+        jointPositions[0] || 0,
+        jointPositions[1] || 0,
+        jointPositions[2] || 0,
+        jointPositions[3] || 0
+    );
+    
+    // Draw joints (spheres)
+    positions.forEach((pos, i) => {
+        let jointGeometry = new THREE.SphereGeometry(0.3, 16, 16);
+        let joint = new THREE.Mesh(jointGeometry, jointMaterial);
+        joint.position.set(pos[0], pos[1], pos[2]);
+        robotJoints.push(joint);
+        robotGroup.add(joint);
+    });
+    
+    // Draw links (cylinders between joints)
+    for (let i = 0; i < positions.length - 1; i++) {
+        let p1 = new THREE.Vector3(positions[i][0], positions[i][1], positions[i][2]);
+        let p2 = new THREE.Vector3(positions[i+1][0], positions[i+1][1], positions[i+1][2]);
+        
+        let direction = new THREE.Vector3().subVectors(p2, p1);
+        let length = direction.length();
+        let midpoint = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5);
+        
+        let linkGeometry = new THREE.CylinderGeometry(0.15, 0.15, length, 8);
+        let link = new THREE.Mesh(linkGeometry, linkMaterial);
+        
+        // Orient cylinder
+        link.position.copy(midpoint);
+        link.lookAt(p2);
+        link.rotateX(Math.PI / 2);
+        
+        robotLinks.push(link);
+        robotGroup.add(link);
+    }
+}
+
+// Draw trajectory
+function updateTrajectory(trajectoryPoints) {
+    if (trajectoryLine) {
+        scene.remove(trajectoryLine);
+    }
+    
+    if (trajectoryPoints && trajectoryPoints.length > 1) {
+        let points = [];
+        trajectoryPoints.forEach(point => {
+            if (Array.isArray(point) && point.length >= 3) {
+                points.push(new THREE.Vector3(point[0], point[1], point[2]));
+            }
+        });
+        
+        if (points.length > 1) {
+            let geometry = new THREE.BufferGeometry().setFromPoints(points);
+            trajectoryLine = new THREE.Line(geometry, trajectoryMaterial);
+            scene.add(trajectoryLine);
+        }
+    }
+}
+
+// Initialize robot with current state
+if (typeof init_state !== 'undefined' && init_state) {
+    if (init_state.joints) {
+        updateRobot(init_state.joints);
+        // Store initial joint values for controller
+        window.currentJ1 = init_state.joints[0] || 0;
+        window.currentJ2 = init_state.joints[1] || 0;
+        window.currentJ3 = init_state.joints[2] || 0;
+        window.currentJ4 = init_state.joints[3] || 0;
+    }
+    if (init_state.trajectory) {
+        updateTrajectory(init_state.trajectory);
+    }
+}
+
+// Gamepad API support (Browser-based controller)
+let gamepad = null;
+let lastGamepadUpdate = 0;
+
+function pollGamepad() {
+    const gamepads = navigator.getGamepads ? navigator.getGamepads() : 
+                   (navigator.webkitGetGamepads ? navigator.webkitGetGamepads() : []);
+    
+    if (gamepads.length > 0 && gamepads[0]) {
+        gamepad = gamepads[0];
+        updateRobotFromGamepad(gamepad);
+    }
+    
+    requestAnimationFrame(pollGamepad);
+}
+
+function updateRobotFromGamepad(gp) {
+    const now = Date.now();
+    if (now - lastGamepadUpdate < 50) return; // Update ~20Hz
+    lastGamepadUpdate = now;
+    
+    // Read axes (normalized to -1 to 1)
+    const leftX = gp.axes[0] || 0;   // Base rotation
+    const leftY = gp.axes[1] || 0;   // Shoulder
+    const rightX = gp.axes[2] || 0;  // Elbow
+    const rightY = gp.axes[3] || 0;  // Wrist
+    
+    // Deadzone
+    const deadzone = 0.1;
+    const applyDeadzone = (val) => Math.abs(val) < deadzone ? 0 : val;
+    
+    const lx = applyDeadzone(leftX);
+    const ly = applyDeadzone(leftY);
+    const rx = applyDeadzone(rightX);
+    const ry = applyDeadzone(rightY);
+    
+    // Update joint angles (degrees per second)
+    const speed = 30; // degrees per second
+    const dt = 0.05; // 50ms update rate
+    
+    let j1 = (window.currentJ1 || 0) + lx * speed * dt;
+    let j2 = (window.currentJ2 || 0) - ly * speed * dt; // Inverted
+    let j3 = (window.currentJ3 || 0) + rx * speed * dt;
+    let j4 = (window.currentJ4 || 0) - ry * speed * dt; // Inverted
+    
+    // Clamp to limits
+    j1 = Math.max(-180, Math.min(180, j1));
+    j2 = Math.max(-90, Math.min(90, j2));
+    j3 = Math.max(-90, Math.min(90, j3));
+    j4 = Math.max(-90, Math.min(90, j4));
+    
+    // Store for next frame
+    window.currentJ1 = j1;
+    window.currentJ2 = j2;
+    window.currentJ3 = j3;
+    window.currentJ4 = j4;
+    
+    // Update the robot visualization
+    updateRobot([j1, j2, j3, j4]);
+}
+
+// Start gamepad polling
+window.addEventListener('gamepadconnected', (e) => {
+    console.log('Gamepad connected:', e.gamepad.id);
+    gamepad = e.gamepad;
+    pollGamepad();
+});
+
+window.addEventListener('gamepaddisconnected', (e) => {
+    console.log('Gamepad disconnected:', e.gamepad.id);
+    gamepad = null;
+});
+
+// Start polling (will run even if no gamepad is connected)
+pollGamepad();
+
+// Animation loop
+function animate() {
+    requestAnimationFrame(animate);
+    if (controls && controls.update) {
+        controls.update();
+    }
+    renderer.render(scene, camera);
+}
+animate();
+
+// Handle window resize
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>
+

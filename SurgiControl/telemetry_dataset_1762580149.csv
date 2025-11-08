@@ -1,0 +1,2 @@
+timestamp,joint_positions,ee_position,ee_orientation,current,torque
+1762580149.885363,"[0.0, 0.0, 0.0, 0.0]","[9.5, 0.0, 0.0]","[0, 0, 0]","[0.0, 0.0, 0.0, 0.0]","[0.0, 0.0, 0.0, 0.0]"
